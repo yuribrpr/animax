@@ -53,6 +53,13 @@ function App() {
         throw new Error(data.message || "Falha ao autenticar");
       }
 
+      if (!data.token) {
+        setMode("login");
+        setFormData(defaultForm);
+        setError(data.message || "Conta criada! Faça login após confirmar seu e-mail.");
+        return;
+      }
+
       persistSession(data.token, data.user);
       setFormData(defaultForm);
     } catch (submitError) {
@@ -109,7 +116,7 @@ function App() {
     <main className="mx-auto flex min-h-screen max-w-md flex-col justify-center p-6">
       <section className="rounded-lg border bg-white p-8 shadow-sm">
         <h1 className="text-2xl font-bold">{mode === "login" ? "Entrar" : "Criar conta"}</h1>
-        <p className="mt-1 text-sm text-slate-600">Sistema com React + Node.js + SQLite</p>
+        <p className="mt-1 text-sm text-slate-600">Sistema com React + Node.js + Supabase</p>
 
         <form onSubmit={handleSubmit} className="mt-6 space-y-4">
           {mode === "register" ? (

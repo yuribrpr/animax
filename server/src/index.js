@@ -1,59 +1,19 @@
 import express from "express";
 import cors from "cors";
-import bcrypt from "bcryptjs";
-import jwt from "jsonwebtoken";
-import { open } from "sqlite";
-import sqlite3 from "sqlite3";
-import path from "path";
-import { fileURLToPath } from "url";
+import { createClient } from "@supabase/supabase-js";
 
 const app = express();
-const PORT = 3001;
-const JWT_SECRET = process.env.JWT_SECRET || "animax-dev-secret";
+const PORT = Number(process.env.PORT) || 3001;
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const dbPath = path.resolve(__dirname, "../database.sqlite");
+const SUPABASE_URL = process.env.SUPABASE_URL || "https://aqxhfwoqmmtkipnuzoqx.supabase.co";
+const SUPABASE_ANON_KEY =
+  process.env.SUPABASE_ANON_KEY ||
+  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFxeGhmd29xbW10a2lwbnV6b3F4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzEwMTM0ODAsImV4cCI6MjA4NjU4OTQ4MH0.3PFJkjNta_17j0RG9XYJjDb3ns-s11xjnCG1eHKbBXg";
+
+const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 app.use(cors());
 app.use(express.json());
-
-const db = await open({
-  filename: dbPath,
-  driver: sqlite3.Database,
-});
-
-await db.exec(`
-  CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    email TEXT NOT NULL UNIQUE,
-    password TEXT NOT NULL,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  )
-`);
-
-const createToken = (user) =>
-  jwt.sign({ id: user.id, email: user.email, name: user.name }, JWT_SECRET, {
-    expiresIn: "1d",
-  });
-
-const authMiddleware = (req, res, next) => {
-  const authHeader = req.headers.authorization;
-
-  if (!authHeader?.startsWith("Bearer ")) {
-    return res.status(401).json({ message: "Token ausente." });
-  }
-
-  const token = authHeader.split(" ")[1];
-
-  try {
-    req.user = jwt.verify(token, JWT_SECRET);
-    return next();
-  } catch {
-    return res.status(401).json({ message: "Token inválido." });
-  }
-};
 
 app.post("/api/register", async (req, res) => {
   const { name, email, password } = req.body;
@@ -66,24 +26,42 @@ app.post("/api/register", async (req, res) => {
     return res.status(400).json({ message: "A senha deve ter ao menos 6 caracteres." });
   }
 
-  const existingUser = await db.get("SELECT id FROM users WHERE email = ?", email);
+  try {
+    const { data, error } = await supabase.auth.signUp({
+      email,
+      password,
+      options: {
+        data: { name },
+      },
+    });
 
-  if (existingUser) {
-    return res.status(409).json({ message: "E-mail já cadastrado." });
+    if (error) {
+      return res.status(400).json({ message: error.message });
+    }
+
+    if (!data.session) {
+      return res.status(202).json({
+        message: "Conta criada. Confirme seu e-mail para fazer login.",
+        token: null,
+        user: {
+          id: data.user?.id,
+          name,
+          email: data.user?.email || email,
+        },
+      });
+    }
+
+    return res.status(201).json({
+      token: data.session.access_token,
+      user: {
+        id: data.user?.id,
+        name: data.user?.user_metadata?.name || name,
+        email: data.user?.email || email,
+      },
+    });
+  } catch {
+    return res.status(502).json({ message: "Falha ao conectar ao Supabase." });
   }
-
-  const hashedPassword = await bcrypt.hash(password, 10);
-  const result = await db.run(
-    "INSERT INTO users (name, email, password) VALUES (?, ?, ?)",
-    name,
-    email,
-    hashedPassword,
-  );
-
-  const user = { id: result.lastID, name, email };
-  const token = createToken(user);
-
-  return res.status(201).json({ token, user });
 });
 
 app.post("/api/login", async (req, res) => {
@@ -93,34 +71,51 @@ app.post("/api/login", async (req, res) => {
     return res.status(400).json({ message: "Informe e-mail e senha." });
   }
 
-  const user = await db.get("SELECT * FROM users WHERE email = ?", email);
+  try {
+    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
 
-  if (!user) {
-    return res.status(401).json({ message: "Credenciais inválidas." });
+    if (error || !data.session || !data.user) {
+      return res.status(401).json({ message: error?.message || "Credenciais inválidas." });
+    }
+
+    return res.json({
+      token: data.session.access_token,
+      user: {
+        id: data.user.id,
+        name: data.user.user_metadata?.name || data.user.email,
+        email: data.user.email,
+      },
+    });
+  } catch {
+    return res.status(502).json({ message: "Falha ao conectar ao Supabase." });
   }
-
-  const passwordMatches = await bcrypt.compare(password, user.password);
-
-  if (!passwordMatches) {
-    return res.status(401).json({ message: "Credenciais inválidas." });
-  }
-
-  const token = createToken(user);
-
-  return res.json({
-    token,
-    user: { id: user.id, name: user.name, email: user.email },
-  });
 });
 
-app.get("/api/me", authMiddleware, async (req, res) => {
-  const user = await db.get("SELECT id, name, email, created_at FROM users WHERE id = ?", req.user.id);
+app.get("/api/me", async (req, res) => {
+  const authHeader = req.headers.authorization;
 
-  if (!user) {
-    return res.status(404).json({ message: "Usuário não encontrado." });
+  if (!authHeader?.startsWith("Bearer ")) {
+    return res.status(401).json({ message: "Token ausente." });
   }
 
-  return res.json(user);
+  const token = authHeader.split(" ")[1];
+
+  try {
+    const { data, error } = await supabase.auth.getUser(token);
+
+    if (error || !data.user) {
+      return res.status(401).json({ message: "Token inválido." });
+    }
+
+    return res.json({
+      id: data.user.id,
+      name: data.user.user_metadata?.name || data.user.email,
+      email: data.user.email,
+      created_at: data.user.created_at,
+    });
+  } catch {
+    return res.status(502).json({ message: "Falha ao conectar ao Supabase." });
+  }
 });
 
 app.listen(PORT, () => {
